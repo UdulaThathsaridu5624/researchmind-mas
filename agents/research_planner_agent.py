@@ -91,7 +91,12 @@ def research_planner_agent(state: ResearchMindState) -> ResearchMindState:
     # Step 1: Extract proposal data
     try:
         extracted: Dict[str, Any] = proposal_analyzer_tool(state["proposal_pdf_path"])
-        state = {**state, "proposal_extracted": extracted}
+        research_topic = _resolve_research_topic(state.get("research_topic", ""), extracted)
+        state = {
+            **state,
+            "research_topic": research_topic,
+            "proposal_extracted": extracted,
+        }
         state = log_agent_event(
             state,
             agent_name="research_planner_agent",
@@ -180,6 +185,23 @@ Generate a complete research implementation plan as a JSON object."""
         },
     )
     return state
+
+
+def _resolve_research_topic(current_topic: str, extracted: Dict[str, Any]) -> str:
+    """Use the user topic when present, otherwise infer it from proposal metadata."""
+    current_topic = (current_topic or "").strip()
+    if current_topic:
+        return current_topic
+
+    title = str(extracted.get("title") or "").strip()
+    if title and title.lower() != "unknown title":
+        return title
+
+    keywords = extracted.get("keywords", [])
+    if keywords:
+        return ", ".join(str(keyword) for keyword in keywords[:5])
+
+    return "Research Proposal"
 
 
 def _parse_llm_json(raw: str) -> Dict[str, Any]:

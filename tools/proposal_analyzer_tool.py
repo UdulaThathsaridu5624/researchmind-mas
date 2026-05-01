@@ -34,6 +34,9 @@ def proposal_analyzer_tool(pdf_path: str) -> Dict[str, Any]:
     Raises:
         FileNotFoundError: If pdf_path does not point to an existing file.
         ValueError: If the PDF yields no extractable text (e.g. scanned image).
+
+    Additional return key:
+        references  (List[str]): Bibliography entries extracted from the References section.
     """
     path = Path(pdf_path)
     if not path.exists():
@@ -58,18 +61,28 @@ def proposal_analyzer_tool(pdf_path: str) -> Dict[str, Any]:
             "Ensure the file is text-based, not a scanned image."
         )
 
-    objectives = _extract_objectives(full_text_default)
-    fallback_objectives = _extract_objectives(full_text_column)
+    # Strip table-of-contents lines before extraction so the extractor finds the
+    # actual section body, not the TOC entry for that heading.
+    clean_default = _strip_toc_lines(full_text_default)
+    clean_column  = _strip_toc_lines(full_text_column)
+
+    objectives = _extract_objectives(clean_default)
+    fallback_objectives = _extract_objectives(clean_column)
     if _objective_score(fallback_objectives) > _objective_score(objectives):
         objectives = fallback_objectives
 
-    scope = _extract_scope(full_text_default) or _extract_scope(full_text_column)
-    methodology = _extract_methodology(full_text_default) or _extract_methodology(full_text_column)
+    scope = _extract_scope(clean_default) or _extract_scope(clean_column)
+    methodology = _extract_methodology(clean_default) or _extract_methodology(clean_column)
 
-    keywords = _extract_keywords(full_text_default)
-    fallback_keywords = _extract_keywords(full_text_column)
+    keywords = _extract_keywords(clean_default)
+    fallback_keywords = _extract_keywords(clean_column)
     if len(fallback_keywords) > len(keywords):
         keywords = fallback_keywords
+
+    # Use original (un-stripped) text for references — page numbers are needed there.
+    references = _extract_references(full_text_default)
+    if not references:
+        references = _extract_references(full_text_column)
 
     return {
         "title": _extract_title(pages_text_default),
@@ -77,6 +90,7 @@ def proposal_analyzer_tool(pdf_path: str) -> Dict[str, Any]:
         "scope": scope,
         "methodology": methodology,
         "keywords": keywords,
+        "references": references,
         "raw_text": full_text,
     }
 
@@ -168,8 +182,15 @@ def _extract_objectives(text: str) -> List[str]:
     )
     if section_text:
         items = re.split(r"\n\s*(?:\d+[.)]\s*|[ivxIVX]+[.)]\s*|[-\u2022*]\s+)", section_text)
-        cleaned = [item.replace("\n", " ").strip() for item in items if item.strip()]
-        result = [item for item in cleaned if len(item) > 5]
+        cleaned = [
+            _strip_leading_section_label(item.replace("\n", " ").strip())
+            for item in items
+            if item.strip()
+        ]
+        result = [
+            item for item in cleaned
+            if len(item) > 5 and not _looks_like_heading_fragment(item)
+        ]
         if result:
             return result
 
@@ -248,7 +269,7 @@ def _extract_section(
         stop_lookahead = (
             r"(?=\n\s*(?:\d+[\.\s]+|[IVXLC]+[\.\s]+)?"
             + heading_body + r"\n"
-            r"|\n\s*(?:references?|bibliography)\s*\n"
+            r"|\n\s*(?i:references?|bibliography)\s*\n"
             r"|\Z)"
         )
     else:
@@ -261,15 +282,15 @@ def _extract_section(
     pattern = (
         r"(?:^|\n)"
         r"(?:\d+[\.\s]+|[IVXLC]+[\.\s]+)?"
-        + heading_pattern
+        + r"(?i:" + heading_pattern + r")"
         + r"[^\n]*\n"
         + r"(.*?)"
         + stop_lookahead
     )
-    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    match = re.search(pattern, text, re.DOTALL)
     if not match:
         return ""
-    return match.group(1).strip()
+    return _drop_toc_residue(match.group(1)).strip()
 
 
 def _extract_page_text(page: Any) -> str:
@@ -408,6 +429,7 @@ def _extract_freeform_section(text: str, heading_pattern: str) -> str:
 
 def _normalize_section_text(value: str) -> str:
     """Normalize whitespace and trim obvious table/figure spillover."""
+    value = _drop_toc_residue(value)
     normalized = re.sub(r"\s+", " ", value).strip()
     normalized = re.sub(r"\b(?:TABLE|FIG)\s*[IVXLC\d]+\b.*$", "", normalized, flags=re.IGNORECASE)
     return normalized.strip()
@@ -419,6 +441,84 @@ def _postprocess_raw_text(text: str) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
+
+
+_TOC_HEADING_WORDS = (
+    "abstract", "introduction", "background", "literature", "review",
+    "objective", "objectives", "scope", "methodology", "methods",
+    "system architecture", "software solution", "commercialization",
+    "future scope", "project requirements", "functional requirements",
+    "non-functional", "system requirements", "user requirements",
+    "gantt chart", "work breakdown", "budget", "references", "appendices",
+    "conclusion", "results", "discussion", "implementation",
+)
+
+
+def _strip_toc_lines(text: str) -> str:
+    """
+    Remove table-of-contents rows before section extraction.
+
+    Proposal PDFs often expose TOC rows as normal text, for example
+    "1 System Architecture ........ 14" or compacted rows containing many
+    headings and page numbers. Those rows can otherwise be mistaken for the
+    body of Objectives or Methodology.
+    """
+    kept: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _looks_like_toc_line(stripped):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _looks_like_toc_line(line: str) -> bool:
+    if not line:
+        return False
+
+    lower = line.lower()
+    heading_hits = sum(1 for word in _TOC_HEADING_WORDS if word in lower)
+
+    has_dot_leader = bool(re.search(r"\.{2,}\s*\d{1,3}\b", line))
+    heading_page_row = bool(
+        re.match(
+            r"^\s*(?:\d+(?:\.\d+)*\.?\s+|[IVXLC]+[\.\s]+)?"
+            r"[A-Za-z][A-Za-z0-9 /&(),:\-]{2,90}\s+\.{0,}\s*\d{1,3}\s*$",
+            line,
+        )
+    )
+    compact_toc = (
+        heading_hits >= 3
+        and len(re.findall(r"\b\d{1,3}\b", line)) >= 3
+        and (has_dot_leader or len(line) > 140)
+    )
+    return has_dot_leader or (heading_hits > 0 and heading_page_row) or compact_toc
+
+
+def _drop_toc_residue(text: str) -> str:
+    """Filter TOC-like rows that survive section-level extraction."""
+    return "\n".join(
+        line for line in text.splitlines() if not _looks_like_toc_line(line.strip())
+    )
+
+
+def _looks_like_heading_fragment(value: str) -> bool:
+    """Detect section/subsection labels that leaked into list extraction."""
+    normalized = re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", value).strip()
+    words = normalized.split()
+    if len(words) > 5:
+        return False
+    return any(word in normalized.lower() for word in _TOC_HEADING_WORDS)
+
+
+def _strip_leading_section_label(value: str) -> str:
+    """Remove subsection labels such as '2.1 Main Objectives' from content."""
+    return re.sub(
+        r"^\s*\d+(?:\.\d+)*\.?\s+(?:main\s+|specific\s+)?objectives?\s+",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    ).strip()
 
 
 def _objective_score(items: List[str]) -> int:
@@ -435,6 +535,39 @@ def _objective_score(items: List[str]) -> int:
         if "the " in item.lower():
             score += 2
     return score
+
+
+def _extract_references(text: str) -> List[str]:
+    """
+    Extract bibliography entries from a References or Bibliography section.
+
+    Handles two common formats:
+    - Numbered brackets : [1] Author et al. ...
+    - Numbered period   : 1. Author et al. ...
+
+    Returns up to 40 entries as plain strings.
+    """
+    # Find the start of the references section
+    ref_match = re.search(
+        r"\n\s*(?:references?|bibliography)\s*\n(.*)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not ref_match:
+        return []
+
+    ref_block = ref_match.group(1).strip()
+
+    # Split on numbered entries: [1] or 1.
+    entries = re.split(r"\n\s*(?:\[\d+\]|\d{1,3}\.)\s+", ref_block)
+    result: List[str] = []
+    for entry in entries:
+        cleaned = re.sub(r"\s+", " ", entry).strip()
+        if len(cleaned) > 15:
+            result.append(cleaned)
+        if len(result) >= 40:
+            break
+    return result
 
 
 def _clean_contribution_items(items: List[str]) -> List[str]:

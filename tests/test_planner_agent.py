@@ -47,6 +47,46 @@ Experiments are conducted on the CheXpert and MIMIC-CXR datasets.
 [2] Dwork et al. (2014). The algorithmic foundations of differential privacy.
 """
 
+REPORT_STYLE_PROPOSAL_TEXT = """ARCHITECTURE-AWARE SPRING BOOT CODE
+
+TABLE OF CONTENTS
+Objectives .......................................................................................... 11
+1 Main Objectives .......................................................................................... 11
+2 Specific Objectives ...................................................................................... 11
+METHODOLOGY ............................................................................................. 14
+1 System Architecture .................................................................................... 14
+2 Software Solution ........................................................................................ 17
+PROJECT REQUIREMENTS ............................................................................ 22
+REFERENCES ........................................................................................................... 26
+
+1. INTRODUCTION
+This proposal investigates architecture-aware generation of Spring Boot code.
+
+2. OBJECTIVES
+2.1 Main Objectives
+The main objective is to develop an IntelliJ IDEA plugin that generates
+architecture-consistent Spring Boot code from project context.
+
+2.2 Specific Objectives
+1. To detect layered, clean, or hexagonal architecture patterns in a Spring Boot project.
+2. To generate controller, service, repository, and DTO classes that follow the detected architecture.
+3. To evaluate generated code for compilability, architectural consistency, and developer usefulness.
+
+3. METHODOLOGY
+3.1 System Architecture
+The system consists of a static analysis module, an architecture classifier,
+a constrained code generation module, and an IntelliJ plugin interface.
+The analyzer extracts packages, annotations, dependencies, and naming patterns
+from the target project before generation.
+
+3.2 Software Solution
+The plugin sends the extracted architectural context to the generation engine,
+then inserts validated Java classes into the correct package locations.
+
+REFERENCES
+[1] Example reference.
+"""
+
 MOCK_LLM_RESPONSE = json.dumps(
     {
         "implementation_plan": (
@@ -88,8 +128,10 @@ MOCK_LLM_RESPONSE = json.dumps(
 def prepare_test_artifacts():
     """Create repo-local placeholder PDFs used by patched tool tests."""
     TEST_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    MOCK_PDF_PATH.touch(exist_ok=True)
-    EMPTY_PDF_PATH.touch(exist_ok=True)
+    if not MOCK_PDF_PATH.exists():
+        MOCK_PDF_PATH.touch()
+    if not EMPTY_PDF_PATH.exists():
+        EMPTY_PDF_PATH.touch()
 
 
 @pytest.fixture
@@ -174,6 +216,27 @@ class TestProposalAnalyzerTool:
 
         result = proposal_analyzer_tool(str(mock_pdf))
         assert result["raw_text"].strip(), "raw_text should not be empty"
+
+    def test_report_style_toc_entries_do_not_become_sections(self):
+        from tools.proposal_analyzer_tool import proposal_analyzer_tool
+
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = REPORT_STYLE_PROPOSAL_TEXT
+
+        mock_pdf_obj = MagicMock()
+        mock_pdf_obj.__enter__ = MagicMock(return_value=mock_pdf_obj)
+        mock_pdf_obj.__exit__ = MagicMock(return_value=False)
+        mock_pdf_obj.pages = [mock_page]
+
+        with patch("pdfplumber.open", return_value=mock_pdf_obj):
+            result = proposal_analyzer_tool(str(MOCK_PDF_PATH))
+
+        objectives = " ".join(result["objectives"])
+        assert "develop an IntelliJ IDEA plugin" in objectives
+        assert "Objectives ................................" not in objectives
+        assert "PROJECT REQUIREMENTS" not in result["methodology"]
+        assert "static analysis module" in result["methodology"]
+        assert "System Architecture ................" not in result["methodology"]
 
     def test_raises_file_not_found(self):
         from tools.proposal_analyzer_tool import proposal_analyzer_tool
