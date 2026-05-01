@@ -67,8 +67,8 @@ Examples:
     )
     parser.add_argument(
         "--output",
-        default="outputs/final_report.json",
-        help="Path to write the final JSON state report (default: outputs/final_report.json).",
+        default="outputs/reports/final_report.json",
+        help="Path to write the final JSON state report (default: outputs/reports/final_report.json).",
     )
     parser.add_argument(
         "--model",

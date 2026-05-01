@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from state import ResearchMindState
 
-LOGS_DIR = Path("logs")
+LOGS_DIR = Path("outputs/logs")
 
 # Session file path is set once on the first call so all events in a single
 # run share the same JSONL file.
