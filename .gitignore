@@ -19,10 +19,19 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+.tmp_pytest/
+outputs/.pytest_tmp/
 
 # Runtime generated
 logs/
-outputs/
+outputs/*
+!outputs/logs/
+!outputs/reports/
+!outputs/logs/.gitkeep
+!outputs/reports/.gitkeep
+outputs/logs/*.jsonl
+outputs/reports/*.json
+outputs/test_artifacts/
 
 # PDF test files (avoid committing large binaries)
 *.pdf
