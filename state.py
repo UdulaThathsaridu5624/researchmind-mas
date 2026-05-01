@@ -30,6 +30,7 @@ class ResearchMindState(TypedDict):
     citation_map: Dict[str, Any]
     core_themes: List[str]
     section_explanations: Dict[str, Any]
+    literature_review_report: Dict[str, Any]
 
     # Agent 3: Gap and Hypothesis outputs
     identified_gaps: List[str]
