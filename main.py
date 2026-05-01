@@ -95,6 +95,7 @@ def _build_initial_state(args: argparse.Namespace) -> ResearchMindState:
         citation_map={},
         core_themes=[],
         section_explanations={},
+        literature_review_report={},
         identified_gaps=[],
         gap_frequency_scores={},
         hypotheses=[],
