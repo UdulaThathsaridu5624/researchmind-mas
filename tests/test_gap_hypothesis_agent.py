@@ -120,3 +120,34 @@ def test_gap_hypothesis_agent_handles_empty_inputs_without_error():
     assert result["errors"] == []
     assert len(result["identified_gaps"]) > 0
     assert len(result["hypotheses"]) > 0
+
+
+def test_gap_hypothesis_agent_resolves_clean_topic_before_tool_call(monkeypatch):
+    import importlib
+
+    agent_module = importlib.import_module("agents.gap_hypothesis_agent")
+
+    captured = {}
+
+    def fake_gap_analyzer_tool(**kwargs):
+        captured["research_topic"] = kwargs["research_topic"]
+        return {
+            "identified_gaps": ["gap"],
+            "gap_frequency_scores": {"generalization": 1.0},
+            "hypotheses": ["hypothesis"],
+            "positioning_statement": "statement",
+            "contradiction_pairs": [],
+        }
+
+    monkeypatch.setattr(agent_module, "gap_analyzer_tool", fake_gap_analyzer_tool)
+
+    state = _initial_state()
+    state["research_topic"] = "Project_Proposal_Intelligent_Smart_City_Command_Center.pdf"
+    state["proposal_extracted"] = {
+        "title": "Project Proposal: Intelligent Smart City Command Center (ISCCC)",
+        "keywords": ["smart city", "command center"],
+    }
+
+    agent_module.gap_hypothesis_agent(state)
+
+    assert captured["research_topic"] == "Intelligent Smart City Command Center (ISCCC)"
