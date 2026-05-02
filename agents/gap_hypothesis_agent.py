@@ -1,8 +1,70 @@
 from __future__ import annotations
 
+import re
+
 from logger import log_agent_event
 from state import ResearchMindState
 from tools.gap_analyzer_tool import gap_analyzer_tool
+
+
+_GENERIC_TOPIC_PREFIXES = (
+    "project proposal",
+    "proposal",
+    "research proposal",
+    "thesis proposal",
+    "final report",
+    "research paper",
+    "paper",
+    "report",
+    "manuscript",
+)
+
+
+def _clean_topic_text(text: str) -> str:
+    text = str(text or "").strip()
+    if not text:
+        return ""
+
+    text = text.replace("_", " ").replace("/", " ").replace("\\", " ")
+    text = re.sub(r"\.(pdf|docx?|pptx?|txt)$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" \t\n\r:;,-")
+
+    for separator in (" | ", " - ", " -- "):
+        if separator in text:
+            parts = [part.strip() for part in text.split(separator) if part.strip()]
+            if parts:
+                text = parts[-1]
+                break
+
+    match = re.match(
+        r"^(?:" + "|".join(re.escape(prefix) for prefix in _GENERIC_TOPIC_PREFIXES) + r")\s*[:\-–—|]\s*(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        text = match.group(1).strip()
+
+    if ":" in text:
+        head, tail = [part.strip() for part in text.split(":", 1)]
+        if head and tail and head.lower() in _GENERIC_TOPIC_PREFIXES:
+            text = tail
+
+    return re.sub(r"\s+", " ", text).strip(" \t\n\r:;,-")
+
+
+def _resolve_gap_topic(state: ResearchMindState) -> str:
+    proposal = state.get("proposal_extracted", {}) or {}
+    proposal_title = _clean_topic_text(proposal.get("title", ""))
+    if proposal_title:
+        return proposal_title
+
+    keywords = proposal.get("keywords", [])
+    if isinstance(keywords, list):
+        keyword_text = _clean_topic_text(", ".join(str(keyword) for keyword in keywords[:5] if str(keyword).strip()))
+        if keyword_text:
+            return keyword_text
+
+    return _clean_topic_text(state.get("research_topic", "")) or "the given topic"
 
 
 def gap_hypothesis_agent(state: ResearchMindState) -> ResearchMindState:
@@ -21,6 +83,7 @@ def gap_hypothesis_agent(state: ResearchMindState) -> ResearchMindState:
     paper_summaries = state.get("paper_summaries", [])
     citation_map = state.get("citation_map", {})
     core_themes = state.get("core_themes", [])
+    resolved_topic = _resolve_gap_topic(state)
 
     state = log_agent_event(
         state,
@@ -38,7 +101,7 @@ def gap_hypothesis_agent(state: ResearchMindState) -> ResearchMindState:
             paper_summaries=paper_summaries,
             citation_map=citation_map,
             core_themes=core_themes,
-            research_topic=state.get("research_topic", "the given topic"),
+            research_topic=resolved_topic,
         )
         state = log_agent_event(
             state,
@@ -51,6 +114,7 @@ def gap_hypothesis_agent(state: ResearchMindState) -> ResearchMindState:
                         "paper_summaries_count": len(paper_summaries),
                         "citation_map_keys": len(citation_map) if isinstance(citation_map, dict) else 0,
                         "themes_count": len(core_themes),
+                        "research_topic": resolved_topic,
                     },
                     "output": {
                         "identified_gaps_count": len(analysis.get("identified_gaps", [])),
