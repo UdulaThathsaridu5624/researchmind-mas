@@ -11,7 +11,6 @@ Run:
 """
 from __future__ import annotations
 
-import json
 import os
 import queue as queue_module
 import re
@@ -29,6 +28,7 @@ from agents.gap_hypothesis_agent import gap_hypothesis_agent
 from agents.literature_review_agent import literature_review_agent
 from agents.paper_auditor_agent import paper_auditor_agent
 from agents.research_planner_agent import research_planner_agent
+from graph import build_graph
 from state import ResearchMindState
 
 # ---------------------------------------------------------------------------
@@ -291,7 +291,7 @@ def _render_research_planner(state: Dict[str, Any]) -> None:
                 # No paragraph breaks — split on sentence boundaries every ~3 sentences
                 sentences = re.split(r'(?<=[.!?])\s+', methodology)
                 chunk, chunks = [], []
-                for j, s in enumerate(sentences):
+                for s in sentences:
                     chunk.append(s)
                     if len(chunk) >= 3:
                         chunks.append(' '.join(chunk))
@@ -475,34 +475,44 @@ AGENT_RENDERERS = {
 
 
 # ---------------------------------------------------------------------------
-# Background pipeline worker
+# Background pipeline worker — uses LangGraph graph.stream()
 # ---------------------------------------------------------------------------
 
-def _agent_thread(
-    node_name: str,
-    state: Dict[str, Any],
+def _pipeline_thread(
+    initial_state: Dict[str, Any],
     result_q: "queue_module.Queue[tuple]",
     stop_event: threading.Event,
 ) -> None:
-    """Run one agent in a background thread. Result goes into result_q."""
-    if stop_event.is_set():
-        result_q.put(("stopped", None))
-        return
+    """
+    Run the full LangGraph pipeline in a background thread.
+
+    Emits events into result_q:
+      ("node_complete", (node_name, full_state_dict)) — after each agent
+      ("pipeline_done", None)                         — when all agents finish
+      ("stopped",       None)                         — if stop_event was set
+      ("error",         str)                          — on unhandled exception
+    """
     try:
-        result = AGENT_FUNCS[node_name](state)
-        result_q.put(("success", result))
+        graph = build_graph()
+        for event in graph.stream(initial_state):
+            if stop_event.is_set():
+                result_q.put(("stopped", None))
+                return
+            # event = {node_name: state_returned_by_that_node}
+            node_name = next(iter(event))
+            node_state = dict(event[node_name])
+            result_q.put(("node_complete", (node_name, node_state)))
+        result_q.put(("pipeline_done", None))
     except Exception as exc:
         result_q.put(("error", str(exc)))
 
 
-def _start_agent(step: int) -> None:
-    """Kick off the background thread for pipeline step `step`."""
-    node_name = AGENT_ORDER[step]
-    result_q: queue_module.Queue = queue_module.Queue(maxsize=1)
+def _start_pipeline() -> None:
+    """Kick off one background thread that streams the full LangGraph pipeline."""
+    result_q: queue_module.Queue = queue_module.Queue()
     t = threading.Thread(
-        target=_agent_thread,
+        target=_pipeline_thread,
         args=(
-            node_name,
             dict(st.session_state.pipeline_state),
             result_q,
             st.session_state.pipeline_stop,
@@ -602,61 +612,57 @@ if st.session_state.pipeline_running:
     q = st.session_state.pipeline_result_q
     try:
         msg_type, data = q.get_nowait()
-        st.session_state.pipeline_running = False
 
-        if msg_type == "success":
-            merged = dict(data)
-            step = st.session_state.pipeline_step
+        if msg_type == "node_complete":
+            # LangGraph finished one node — update UI, keep thread running
+            node_name, node_state = data
+            merged = dict(node_state)
+            step = AGENT_ORDER.index(node_name)
 
-            # Auto-populate research_topic from extracted title (Agent 1 only)
+            # Auto-populate research_topic from proposal title after Agent 1
             if step == 0:
                 title = merged.get("proposal_extracted", {}).get("title", "")
                 if title:
                     merged["research_topic"] = title
                     st.session_state.pipeline_topic = title
-                    # Update the user bubble so it shows the real title permanently
                     for m in st.session_state.messages:
                         if m["role"] == "user":
                             m["content"] = title
                             break
 
             st.session_state.pipeline_state = merged
-
-            node_name = AGENT_ORDER[step]
             st.session_state.messages.append({
                 "role": "assistant",
                 "node": node_name,
                 "state": dict(merged),
             })
 
-            errors = merged.get("errors", [])
-            stopped = st.session_state.pipeline_stop.is_set()
-            last_step = (step == len(AGENT_ORDER) - 1)
+            # Advance spinner to next agent (pipeline thread still running)
+            next_step = step + 1
+            st.session_state.pipeline_step = (
+                next_step if next_step < len(AGENT_ORDER) else -1
+            )
 
-            if errors or stopped or last_step:
-                # Pipeline finished (naturally, by error, or by stop)
-                st.session_state.pipeline_step = -1
-                st.session_state.pipeline_stopping = False
-                st.session_state.final_state = merged
-                _cleanup(st.session_state.tmp_paths)
-                st.session_state.tmp_paths = []
-                if stopped:
-                    st.toast("Pipeline stopped.", icon="⏹")
-            else:
-                # Advance to next agent immediately
-                next_step = step + 1
-                st.session_state.pipeline_step = next_step
-                _start_agent(next_step)
+        elif msg_type == "pipeline_done":
+            # LangGraph stream ended — all agents finished
+            st.session_state.pipeline_running = False
+            st.session_state.pipeline_step = -1
+            st.session_state.pipeline_stopping = False
+            st.session_state.final_state = dict(st.session_state.pipeline_state or {})
+            _cleanup(st.session_state.tmp_paths)
+            st.session_state.tmp_paths = []
 
         elif msg_type == "stopped":
+            st.session_state.pipeline_running = False
             st.session_state.pipeline_step = -1
             st.session_state.pipeline_stopping = False
             _cleanup(st.session_state.tmp_paths)
             st.session_state.tmp_paths = []
+            st.toast("Pipeline stopped.", icon="⏹")
 
         elif msg_type == "error":
-            st.session_state.pipeline_step = -1
             st.session_state.pipeline_running = False
+            st.session_state.pipeline_step = -1
             st.session_state.pipeline_stopping = False
             _cleanup(st.session_state.tmp_paths)
             st.session_state.tmp_paths = []
@@ -836,7 +842,7 @@ if run_mode == "Full Pipeline":
             "content": st.session_state.pipeline_topic,
         })
 
-        _start_agent(0)
+        _start_pipeline()
         st.rerun()
 
     # ── Render chat history ────────────────────────────────────────────────
